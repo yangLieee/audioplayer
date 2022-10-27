@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.0.0)
+project(libalsaplay)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lasound")
+include_directories(./ ../mlog)
+add_library(alsaplay STATIC alsaOut.cpp)
+target_link_libraries(alsaplay asound)

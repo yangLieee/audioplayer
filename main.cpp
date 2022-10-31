@@ -1,17 +1,30 @@
 #include <stdio.h>
 #include "mlog.h"
 #include "alsaOut.h"
+#include "player.h"
 
 int main(int argc, char *argv[])
 {
-    alsaOut* alsa = new alsaOut();
-    alsa->openDevice("default", 2, 48000);
-    FILE *fp = fopen(argv[1], "rb");
-    fseek(fp, SEEK_SET, 44);
-    uint16_t buf[4096];
-    while(1) {
-        fread(buf, 1, 4096, fp);
-        alsa->playback(buf, 1024);
-    }
+    if(argc < 2) {
+        printf("Usage: ./player filename\n");
+        return -1;
+    } 
+    audioplayer *player = new audioplayer();
+    player->Init(argv[1]);
+    player->getDuration();
+    player->start();
+    sleep(5);
+    player->seek(0);
+    sleep(5);
+    player->pause();
+    player->stop();
+    player->seek(227);
+    player->seek(0);
+    sleep(5);
+    player->start();
+    player->seek(45);
+    sleep(5);
+    player->stop();
+
     return 0;
 }

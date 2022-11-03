@@ -2,6 +2,7 @@
 #include <string.h>
 #include "player.h"
 #include "wavDecoder.h"
+#include "mp3Decoder.h"
 #include "mlog.h"
 
 #define MLOG_LEVEL DEBUG
@@ -30,7 +31,7 @@ bool audioplayer::Init(const char* fname)
             mdecoder = wavdecoder::getInstance(fname, &aparam);
             break;
         case MP3:
-//            mdecoder = mp3decoder::getInstance(fname);
+            mdecoder = mp3decoder::getInstance(fname, &aparam);
             break;
     }
     alsaout = new alsaOut();

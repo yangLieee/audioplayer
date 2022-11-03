@@ -17,9 +17,8 @@ int main(int argc, char *argv[])
     player->seek(0);
     sleep(5);
     player->pause();
-    player->stop();
     player->seek(227);
-    player->seek(0);
+    player->seek(37);
     sleep(5);
     player->start();
     player->seek(45);

@@ -1,12 +1,10 @@
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <mutex>
-#include <thread>
 #include <condition_variable>
 #include "mp3Decoder.h"
 #include "mlog.h"
-
-#define MLOG_LEVEL DEBUG
 
 /* global variable （Fix Info）*/
 static unsigned long file_size;         //audio file size
@@ -16,13 +14,13 @@ static unsigned int duration;
 static unsigned int current_sec;        //playback progress(second)
 static unsigned int ibufsize;
 static unsigned int obufsize;
+static bool decodeLoop_isdone;
 MP3ID3V1 minfo;
 
 /*  read - write sync control */
 std::mutex glock;
 std::condition_variable mCond;
 static bool isfull;
-static bool isStop;
 
 mp3decoder::mp3decoder()
 {
@@ -33,7 +31,7 @@ mp3decoder::mp3decoder()
     current_sec = 0;
     ibufsize = 0;
     obufsize = 0;
-    isStop = false;
+    decodeLoop_isdone = false;
     memset(&mbuf, 0, sizeof(buffer));
     memset(&minfo, 0, sizeof(MP3ID3V1));
 }
@@ -46,6 +44,16 @@ mp3decoder::~mp3decoder()
     mbuf.mfp = NULL;
 }
 
+void mp3decoder::decodeLoop()
+{
+    mad_decoder_init(&mbuf.decoder, &mbuf,
+            input, 0 /* header */, 0/*filter*/, output,
+            error, 0/*message*/);
+    mad_decoder_run(&mbuf.decoder, MAD_DECODER_MODE_SYNC);
+    mad_decoder_finish(&mbuf.decoder);
+    decodeLoop_isdone = true;
+}
+
 bool mp3decoder::Init(const char* fname, audioParams *aparam)
 {
     mbuf.mfp = fopen(fname, "rb");
@@ -53,12 +61,11 @@ bool mp3decoder::Init(const char* fname, audioParams *aparam)
         MLOGE("Failed open %s!", fname);
         return false;
     }
-    head_parser(mbuf.mfp, &file_size, &label_size);
     mbuf.aparam = aparam;
     /* preprocess decode to get param */
     mad_decoder_init(&mbuf.decoder, &mbuf,
             input_preprocess, header_preprocess /* header */, 0 /* filter */, 0,
-            0/*error*/,  0 /* message */);
+            error/*error*/,  0 /* message */);
     mad_decoder_run(&mbuf.decoder, MAD_DECODER_MODE_SYNC);
     mad_decoder_finish(&mbuf.decoder);
 
@@ -67,12 +74,8 @@ bool mp3decoder::Init(const char* fname, audioParams *aparam)
 
     /* decode process */
     fseek(mbuf.mfp, label_size, SEEK_SET);
-    mad_decoder_init(&mbuf.decoder, &mbuf,
-            input, 0/*header*/, 0/*filter*/, output,
-            error, 0/*message*/);
-    std::thread decodeThread = std::thread(mad_decoder_run, &mbuf.decoder, MAD_DECODER_MODE_SYNC);
+    decodeThread = std::thread(&mp3decoder::decodeLoop, this);
     decodeThread.detach();
-
     return true;
 }
 
@@ -105,7 +108,8 @@ void mp3decoder::stop()
     mbuf.mstop = true;
     isfull = false;
     mCond.notify_one();
-//    mCond.wait(lck, [this](){return isStop == true;});
+    while(!decodeLoop_isdone)
+        usleep(100);
     if(mdecoder != NULL)
         delete mdecoder;
     mdecoder = NULL;
@@ -121,6 +125,7 @@ int mp3decoder::getDuration()
 enum mad_flow mp3decoder::input(void *data, struct mad_stream *stream)
 {
     std::unique_lock<std::mutex> lck(glock);
+    mCond.wait(lck, []{return !isfull;});
     int data_size = 0, copy_size = 0;
     int dataLen = file_size - label_size;
     struct buffer *buf = (struct buffer*)data;
@@ -139,14 +144,8 @@ enum mad_flow mp3decoder::input(void *data, struct mad_stream *stream)
         buf->fbsize =  copy_size + data_size;
 
         mad_stream_buffer(stream, buf->sbuf, buf->fbsize);
-
     } 
-    if(buf->mstop) {
-        MLOGI();
-        return MAD_FLOW_STOP;
-    }
-    else
-        return MAD_FLOW_CONTINUE;
+    return MAD_FLOW_CONTINUE;
 }
 
 static inline signed int scale(mad_fixed_t sample)
@@ -166,8 +165,6 @@ static inline signed int scale(mad_fixed_t sample)
 
 enum mad_flow mp3decoder::output(void *data, struct mad_header const *header, struct mad_pcm *pcm)
 {
-    std::unique_lock<std::mutex> lck(glock);
-    mCond.wait(lck, []{return !isfull;});
     struct buffer *buf = (struct buffer*)data;
     unsigned int nchannels = 0, nsamples = 0;
     mad_fixed_t const *left_ch=NULL, *right_ch=NULL;
@@ -194,13 +191,15 @@ enum mad_flow mp3decoder::output(void *data, struct mad_header const *header, st
     isfull = true;
     mCond.notify_one();
 
+    if(buf->mstop)
+        return MAD_FLOW_STOP;
     return MAD_FLOW_CONTINUE;
 }
 
 enum mad_flow mp3decoder::error(void *data, struct mad_stream *stream, struct mad_frame *frame)
 {
     struct buffer *buf = (struct buffer*)data;
-    MLOGE("decoding error 0x%04x (%s) at byte offset %lu\n",\
+    MLOGE("decoding error 0x%04x (%s) at byte offset %lu",\
             stream->error, mad_stream_errorstr(stream),\
             stream->this_frame - buf->sbuf);
     /* return MAD_FLOW_BREAK here to stop decoding (and propagate an error) */
@@ -211,23 +210,36 @@ enum mad_flow mp3decoder::error(void *data, struct mad_stream *stream, struct ma
 enum mad_flow mp3decoder::input_preprocess(void *data, struct mad_stream *stream)
 {
     struct buffer *buf = (struct buffer *)data;
-    unsigned char temp_buf[1024] = {0};
-    /* parser ID3V1 header */
+    unsigned char temp_buf[PREPROCESS_BUFSIZE] = {0};
+
+    /* parser ID3V1 header, last 128 bytes */
     fseek(buf->mfp, -128, SEEK_END);
     fread(&minfo, sizeof(char), 128, buf->mfp);
     if(strncmp(minfo.header, "TAG", 3)!= 0) {
         MLOGE("NO ID3V1 TAG");
     }
+    MLOGI("<< %s >> is play by '%s'", minfo.title, minfo.artist);
 
-    /* read 1024 byte for params parser */
+    /* parser ID3V2 header, first 10 bytes */
+    char label[10];
+    fseek(buf->mfp, 0, SEEK_SET);
+    fread(label, 1, sizeof(label), buf->mfp);
+    unsigned long fsta = ftell(buf->mfp);
+    fseek(buf->mfp, 0, SEEK_END);
+    unsigned long fend = ftell(buf->mfp);
+    file_size = fend - fsta;
+    label_size = (((label[6]&0x7F)<<21) | ((label[7]&0x7F)<<14) | ((label[8]&0x7F)<<7) | ((label[9]&0x7F))) + 10;
+    MLOGI("File length %ld, label length %d", file_size, label_size);
+
+    /* read PREPROCESS_BUFSIZE byte for params parser */
     fseek(buf->mfp, label_size, SEEK_SET);
-    fread(temp_buf, sizeof(char), 1024, buf->mfp);
-    mad_stream_buffer(stream, temp_buf, 1024);
+    fread(temp_buf, sizeof(char), PREPROCESS_BUFSIZE, buf->mfp);
+    mad_stream_buffer(stream, temp_buf, PREPROCESS_BUFSIZE);
     return MAD_FLOW_CONTINUE;
 }
 
 /* preprocess callback function, read frame head to get audio parameters */
- enum mad_flow mp3decoder::header_preprocess(void *data,  struct mad_header const *header )
+ enum mad_flow mp3decoder::header_preprocess(void *data,  struct mad_header const *header)
 {
     struct buffer *buf = (struct buffer *)data;
 
@@ -239,42 +251,22 @@ enum mad_flow mp3decoder::input_preprocess(void *data, struct mad_stream *stream
     else
         buf->aparam->channels = 2;
     MLOGI("samplerate: %d, channels: %d, bitrate: %ld",header->samplerate,buf->aparam->channels,header->bitrate);
+
     /*
+     * set audio input output buffer size
      * 每帧长度 = ( 每帧采样数 / 8 * 比特率) / 采样频率 + 帧长调节
      * 播放时长 = ( 文件大小 –  ID3大小 ) × 8 ÷ 比特率(bit/s)
      */
     frame_size = (1152 / 8 * header->bitrate) / header->samplerate + (header->crc_check==1?2:0);
     if(header->bitrate % 32 == 0) {
         duration = (file_size - label_size) * 8 / header->bitrate;
-        MLOGI("Check bitrate  mode: CBR, duration: %ds",duration);
+        MLOGI("Check bitrate  mode: CBR, duration: %ds and frame_size is %d",duration, frame_size);
     }else
         MLOGW("Check bitrate mode : VBR. Need recalculate! [to do]");
     ibufsize = frame_size * 2;
     obufsize = 1152 * 2 * buf->aparam->channels;
 
     return MAD_FLOW_STOP;
-}
-
-int mp3decoder::head_parser(FILE *fp, unsigned long *len, unsigned int *label_size)
-{
-    unsigned long fsta, fend;
-    char label[10];
-
-    fsta = ftell(fp);
-    fseek(fp, 0, SEEK_END);
-    fend = ftell(fp);
-    *len = fend - fsta;
-    fseek(fp, 0, SEEK_SET);
-    if (*len <= 0) {
-        printf("The file is invalid");
-        return -1;
-    }
-
-    fread(label, 1, sizeof(label), fp);
-    *label_size = ((label[6]&0x7F)<<21)|((label[7]&0x7F)<<14)|((label[8]&0x7F)<<7)|((label[9]&0x7F));
-    *label_size += 10;
-    MLOGI("File length %ld, label length %d",*len, *label_size);
-    return 0;
 }
 
 mp3decoder* mp3decoder::mdecoder = NULL;

@@ -16,6 +16,8 @@ wavdecoder::wavdecoder()
 
 wavdecoder::~wavdecoder()
 {
+    fclose(fp);
+    fp = NULL;
 }
 
 bool wavdecoder::Init(const char* fname, audioParams *aparam)

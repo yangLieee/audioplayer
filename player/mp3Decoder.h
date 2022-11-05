@@ -1,8 +1,12 @@
 #ifndef _MP3DECODER_H_
 #define _MP3DECODER_H_
 
+#include <thread>
 #include "decoderImp.h"
 #include "mad.h"
+
+#define PREPROCESS_BUFSIZE 4096
+#define MLOG_LEVEL DEBUG
 
 typedef struct {
     char header[3];
@@ -28,6 +32,7 @@ class mp3decoder : public decoderImp
         mp3decoder();
         ~mp3decoder();
         static mp3decoder* mdecoder;
+        std::thread decodeThread;
 
         struct buffer {
             FILE *mfp;
@@ -41,16 +46,14 @@ class mp3decoder : public decoderImp
         };
         struct buffer mbuf;
 
-        int head_parser(FILE *fp, unsigned long *len, unsigned int *label_size);
+        void decodeLoop();
         //preprocess  callback function
         static enum mad_flow input_preprocess(void *data, struct mad_stream *stream);
-        static enum mad_flow header_preprocess(void *data,  struct mad_header const *header );
+        static enum mad_flow header_preprocess(void *data,  struct mad_header const *header);
         //decode callback function
-        static enum mad_flow header(void *data,  struct mad_header const *header );
         static enum mad_flow input(void *data, struct mad_stream *stream);
         static enum mad_flow output(void *data, struct mad_header const *header, struct mad_pcm *pcm);
         static enum mad_flow error(void *data, struct mad_stream *stream, struct mad_frame *frame);
-
 };
 
 

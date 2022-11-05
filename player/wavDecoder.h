@@ -26,10 +26,7 @@ class wavdecoder : public decoderImp
         int duration;
         struct wavHead head;
         unsigned char rbuf[BUFFER_SIZE];
-
-
         static wavdecoder* mdecoder;
-
 };
 
 

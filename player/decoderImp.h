@@ -1,7 +1,6 @@
 #ifndef _DECODERIMP_H_
 #define _DECODERIMP_H_
 
-
 struct audioParams
 {
     char channels;

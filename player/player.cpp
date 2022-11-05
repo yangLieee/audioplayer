@@ -21,6 +21,8 @@ audioplayer::audioplayer()
 
 audioplayer::~audioplayer()
 {
+    alsaout = NULL;
+    mdecoder = NULL;
 }
 
 bool audioplayer::Init(const char* fname)
